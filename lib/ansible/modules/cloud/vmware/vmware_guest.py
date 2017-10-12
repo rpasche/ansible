@@ -1091,6 +1091,11 @@ class PyVmomiHelper(PyVmomi):
                         datastore_freespace = ds.summary.freeSpace
 
             elif 'datastore' in self.params['disk'][0]:
+                # check, if it is a SDRS cluster
+                sdrs = self.cache.find_obj(content, [vim.StoragePod], self.params['disk'][0]['datastore'])
+                if sdrs:
+                    return None, None, sdrs
+
                 datastore_name = self.params['disk'][0]['datastore']
                 datastore = self.cache.find_obj(self.content, [vim.Datastore], datastore_name)
             else:
@@ -1222,6 +1227,8 @@ class PyVmomiHelper(PyVmomi):
         #   - multiple templates by the same name
         #   - static IPs
 
+        sdrs = False
+
         # datacenters = get_all_objs(self.content, [vim.Datacenter])
         datacenter = self.cache.find_obj(self.content, [vim.Datacenter], self.params['datacenter'])
         if datacenter is None:
@@ -1264,14 +1271,16 @@ class PyVmomiHelper(PyVmomi):
         if self.params['resource_pool'] or self.params['template']:
             resource_pool = self.get_resource_pool()
 
+        podsel = None
+        storagespec = None
+
         # set the destination datastore for VM & disks
-        (datastore, datastore_name) = self.select_datastore(vm_obj)
+        (datastore, datastore_name, sdrs) = self.select_datastore(vm_obj)
 
         self.configspec = vim.vm.ConfigSpec(cpuHotAddEnabled=True, memoryHotAddEnabled=True)
         self.configspec.deviceChange = []
         self.configure_guestid(vm_obj=vm_obj, vm_creation=True)
         self.configure_cpu_and_memory(vm_obj=vm_obj, vm_creation=True)
-        self.configure_disks(vm_obj=vm_obj)
         self.configure_network(vm_obj=vm_obj)
         self.configure_cdrom(vm_obj=vm_obj)
 
@@ -1286,6 +1295,15 @@ class PyVmomiHelper(PyVmomi):
 
         if len(self.params['customization']) > 0 or network_changes is True:
             self.customize_vm(vm_obj=vm_obj)
+
+        if not sdrs:
+            self.configure_disks(vm_obj=vm_obj)
+        else:
+            podsel = vim.storageDrs.PodSelectionSpec()
+            podsel.storagePod = sdrs
+            storagespec = vim.storageDrs.StoragePlacementSpec()
+            storagespec.podSelectionSpec = podsel
+            storagespec.folder = destfolder
 
         clonespec = None
         clone_method = None
@@ -1324,15 +1342,26 @@ class PyVmomiHelper(PyVmomi):
             else:
                 # ConfigSpec require name for VM creation
                 self.configspec.name = self.params['name']
-                self.configspec.files = vim.vm.FileInfo(logDirectory=None,
+                resource_pool = self.get_resource_pool()
+
+                # only add .files if not SDRS
+                if not sdrs:
+                    self.configspec.files = vim.vm.FileInfo(logDirectory=None,
                                                         snapshotDirectory=None,
                                                         suspendDirectory=None,
                                                         vmPathName="[" + datastore_name + "] " + self.params["name"])
 
-                clone_method = 'CreateVM_Task'
-                resource_pool = self.get_resource_pool()
-                task = destfolder.CreateVM_Task(config=self.configspec, pool=resource_pool)
-                self.change_detected = True
+                    clone_method = 'CreateVM_Task'
+                    task = destfolder.CreateVM_Task(config=self.configspec, pool=resource_pool)
+                    self.change_detected = True
+                else:
+                    storagespec.type = 'create'
+                    storagespec.resource_pool = resource_pool
+                    storagespec.configSpec = self.configspec
+
+                    rec_result = content.storageResourceManager.RecommendDatastores(storageSpec=storagespec)
+                    rec_key = rec_result.recommendations[0].key
+                    task = content.storageResourceManager.ApplyStorageDrsRecommendation_Task(rec_key)
             self.wait_for_task(task)
         except TypeError as e:
             self.module.fail_json(msg="TypeError was returned, please ensure to give correct inputs. %s" % to_text(e))
