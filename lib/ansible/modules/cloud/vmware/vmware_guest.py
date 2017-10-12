@@ -1068,6 +1068,7 @@ class PyVmomiHelper(PyVmomi):
     def select_datastore(self, vm_obj=None):
         datastore = None
         datastore_name = None
+        sdrs = None
 
         if len(self.params['disk']) != 0:
             # TODO: really use the datastore for newly created disks
@@ -1117,7 +1118,7 @@ class PyVmomiHelper(PyVmomi):
         if not datastore:
             self.module.fail_json(msg="Failed to find a matching datastore")
 
-        return datastore, datastore_name
+        return datastore, datastore_name, sdrs
 
     def obj_has_parent(self, obj, parent):
         assert obj is not None and parent is not None
